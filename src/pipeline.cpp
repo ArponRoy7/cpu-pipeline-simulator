@@ -2,23 +2,16 @@
 #include "trace_loader.hpp"
 #include <sstream>
 
-static inline bool is_branch(const Instruction& ins) {
-    return ins.op == Opcode::BEQ || ins.op == Opcode::BNE;
-}
-
-// Demo rule for branch outcome (until a real regfile exists):
-// "taken" iff imm < 0
-static inline bool actual_taken_of(const Instruction& ins) {
-    return ins.imm < 0;
-}
-
 Pipeline::Pipeline(const std::vector<Instruction>& program,
                    bool forwarding_on,
                    BranchPredictor* bp)
 : prog_(program), forwarding_(forwarding_on), bp_(bp) {}
 
 void Pipeline::step() {
-    // --- Retire (WB) from previous cycle ---
+    // --- Retire (WB) from previous cycle: snapshot MEM/WB so CSV shows WB this cycle ---
+    last_wb_ins_   = memwb_.ins;
+    last_wb_valid_ = memwb_.valid;
+
     if (memwb_.valid) {
         if (memwb_.ins.op == Opcode::HALT) {
             halted_ = true;
@@ -27,7 +20,7 @@ void Pipeline::step() {
         }
     }
 
-    // --- Data hazard check for ID vs EX/MEM/WB ---
+    // --- Data hazard check for the instruction currently in ID stage (ifid_) ---
     HazardDecision hz = detect_hazard_for_ID(
         ifid_.ins,  ifid_.valid,   // ID
         idex_.ins,  idex_.valid,   // EX
@@ -36,44 +29,39 @@ void Pipeline::step() {
         forwarding_
     );
 
-    // ---------- Stage advance skeleton ----------
-    // Snapshot the current WB BEFORE shifting; this is what the CSV should show as WB this cycle
-    last_wb_ins_   = memwb_.ins;
-    last_wb_valid_ = memwb_.valid;
+    // ---------- Compute next pipeline registers (WB <- MEM <- EX <- ID) ----------
+    MEMWB next_wb  = { exmem_.ins, exmem_.valid }; // WB gets previous EX/MEM
+    EXMEM next_ex  = { idex_.ins,  idex_.valid  }; // EX gets previous ID/EX (shown as EX in CSV)
+    IDEX  next_id  = { ifid_.ins,  ifid_.valid  }; // ID gets previous IF/ID
+    IFID  next_if  =  ifid_;                       // IF/ID defaults to hold; fetch may overwrite
 
-    // WB <= MEM
-    MEMWB next_wb  = { exmem_.ins, exmem_.valid };
-    // MEM <= EX
-    EXMEM next_mem = { idex_.ins,  idex_.valid  };
-    // EX default <= ID (may become bubble)
-    IDEX  next_ex  = { ifid_.ins,  ifid_.valid  };
-    // IF default (may be overwritten by fetch/flush)
-    IFID  next_ifid = ifid_;
-
-    // -------- Branch prediction at ID + choose fetch PC --------
+    // -------- Decide fetch behaviour & potential ID bubble insertion --------
     bool can_fetch = true;
-    int fetch_pc = pc_; // default sequential
+    int  fetch_pc  = pc_; // default is to continue from pc_
 
     if (control_flush_bubbles_ > 0) {
-        // During control flush: bubble EX and do not fetch
-        can_fetch = false;
-        next_ex = { Instruction{Opcode::NOP}, false };
-        control_flush_bubbles_--;  // consume one bubble this cycle
+        // Control hazard flush: insert a bubble into the ID→EX slot
+        next_id = { Instruction{Opcode::NOP}, false };
+        ex_bubble_label_ = "STALL_CTRL";
+        can_fetch = false;               // kill fetch this cycle
+        control_flush_bubbles_--;
+        m_.stalls.control++;             // count bubble cycles individually
     } else if (hz.stall) {
-        // RAW stall: hold IF/ID, bubble EX, no fetch
-        next_ex = { Instruction{Opcode::NOP}, false };
+        // Data hazard stall: bubble ID→EX and hold IF/ID; do not fetch
+        next_id = { Instruction{Opcode::NOP}, false };
+        ex_bubble_label_ = "STALL_RAW";
         can_fetch = false;
         m_.stalls.raw++;
     } else {
-        // Normal advance: maybe redirect based on ID-stage prediction
+        ex_bubble_label_.clear();        // normal advance; no bubble from ID
+        // Perform branch prediction at ID to choose next fetch PC
         if (bp_ && ifid_.valid && is_branch(ifid_.ins)) {
-            const bool pred = bp_->predict(ifid_.ins.pc);
+            bool pred = bp_->predict(ifid_.ins.pc);
             m_.bp_predictions++;
             pred_taken_by_id_[ifid_.ins.id] = pred;
-
-            const int target = ifid_.ins.pc + 1 + ifid_.ins.imm;
-            const int fallth = ifid_.ins.pc + 1;
-            fetch_pc = pred ? target : fallth;
+            int target  = ifid_.ins.pc + 1 + ifid_.ins.imm;
+            int fall_th = ifid_.ins.pc + 1;
+            fetch_pc = pred ? target : fall_th;
         } else {
             fetch_pc = pc_;
         }
@@ -82,49 +70,47 @@ void Pipeline::step() {
     // -------- Fetch into IF/ID (only if allowed) --------
     if (can_fetch) {
         if (!halted_ && fetch_pc >= 0 && fetch_pc < (int)prog_.size()) {
-            next_ifid.ins = prog_[fetch_pc];
-            next_ifid.valid = true;
-            pc_ = fetch_pc + 1; // next default fetch continues after this one
+            next_if.ins = prog_[fetch_pc];
+            next_if.valid = true;
+            pc_ = fetch_pc + 1; // default next sequential
         } else {
-            next_ifid.ins = Instruction{Opcode::NOP};
-            next_ifid.valid = false;
+            next_if.ins = Instruction{Opcode::NOP};
+            next_if.valid = false;
         }
-    }
-    // else: keep IF/ID as-is (stall/flush path)
+    } // else: hold IF/ID and do not change pc_
 
-    // -------- Branch resolution at EX --------
+    // -------- Branch resolution at EX (the instruction that was in ID last cycle) --------
     if (idex_.valid && is_branch(idex_.ins) && bp_) {
-        const bool actual = actual_taken_of(idex_.ins);
-
+        bool actual = actual_taken_of(idex_.ins);
         bool predicted = false;
-        if (auto it = pred_taken_by_id_.find(idex_.ins.id); it != pred_taken_by_id_.end())
+        if (auto it = pred_taken_by_id_.find(idex_.ins.id); it != pred_taken_by_id_.end()) {
             predicted = it->second;
+        }
 
         if (predicted != actual) {
-            // Mispredict: flush IF & ID (2 bubbles) and redirect PC
+            // Mispredict: redirect and flush IF & ID in the *next* two cycles (bubble count)
             m_.bp_mispredictions++;
-            m_.stalls.control += 2;
             control_flush_bubbles_ = 2;
 
-            const int target = idex_.ins.pc + 1 + idex_.ins.imm;
-            const int fallth = idex_.ins.pc + 1;
-            pc_ = actual ? target : fallth;
+            int target  = idex_.ins.pc + 1 + idex_.ins.imm;
+            int fall_th = idex_.ins.pc + 1;
+            pc_ = actual ? target : fall_th;
 
-            // squash wrong-path next IF
-            next_ifid.ins = Instruction{Opcode::NOP};
-            next_ifid.valid = false;
+            // Squash any wrong-path fetch we may have placed for the upcoming cycle
+            next_if.ins = Instruction{Opcode::NOP};
+            next_if.valid = false;
         }
 
-        // Train predictor and forget saved pred
+        // Train predictor with ground truth
         bp_->update(idex_.ins.pc, actual);
         pred_taken_by_id_.erase(idex_.ins.id);
     }
 
-    // -------- Commit stage moves --------
+    // -------- Commit new stage registers --------
     memwb_ = next_wb;
-    exmem_ = next_mem;
-    idex_  = next_ex;
-    ifid_  = next_ifid;
+    exmem_ = next_ex;
+    idex_  = next_id;
+    ifid_  = next_if;
 
     // Bookkeeping
     cycle_++;
@@ -136,13 +122,20 @@ std::string Pipeline::csv_row() const {
         if (!v) return std::string("-");
         return opcode_name(ins.op) + "#" + std::to_string(ins.id);
     };
+
+    // We show the bubble label in the ID column (the slot we bubbled)
+    auto id_cell = [&]() -> std::string {
+        if (!idex_.valid && !ex_bubble_label_.empty()) return ex_bubble_label_;
+        return ins_str(idex_.ins, idex_.valid);
+    };
+
     std::ostringstream oss;
-    // 6 columns: cycle, IF, ID, EX, MEM, WB
+    // 6 columns: cycle,IF,ID,EX,MEM,WB
     oss << cycle_ << ","
-        << ins_str(ifid_.ins,  ifid_.valid)  << ","  // IF
-        << ins_str(idex_.ins,  idex_.valid)  << ","  // ID
-        << ins_str(exmem_.ins, exmem_.valid) << ","  // EX
-        << ins_str(memwb_.ins, memwb_.valid) << ","  // MEM
-        << ins_str(last_wb_ins_, last_wb_valid_);    // WB (snapshot captured before shift)
+        << ins_str(ifid_.ins,  ifid_.valid)   << ","
+        << id_cell()                          << ","
+        << ins_str(exmem_.ins, exmem_.valid)  << ","
+        << ins_str(memwb_.ins, memwb_.valid)  << ","
+        << ins_str(last_wb_ins_, last_wb_valid_);
     return oss.str();
 }
