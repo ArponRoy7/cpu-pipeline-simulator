@@ -46,3 +46,47 @@ __pycache__/
 /traces/*
 !/traces/sample.trace
 !/traces/branch_demo.trace
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# build output
+/dist
+/build
+
+# temp / debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# editor stuff
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# environment
+.env
+.env.local
+.env.*.local
+
+# macOS / linux
+.DS_Store
+Thumbs.db
+
+# Vite
+.vite
+
+# Tailwind
+*.css.map
+
+# local UI data
+/public/runs/*
+!public/runs/.gitkeep
+

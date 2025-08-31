@@ -86,3 +86,59 @@ public:
 private:
     std::unordered_map<int, int> table; // pc -> state (0..3)
 };
+// --------------- Tournament Predictor (1-bit vs 2-bit with chooser) ---------------
+class TournamentPredictor : public BranchPredictor {
+public:
+    bool predict(int pc) override {
+        // Compute both component predictions
+        bool p1 = onebit_.predict(pc);
+        bool p2 = twobit_.predict(pc);
+
+        // Choose which to use by chooser state (0..3)
+        int &ch = chooser_[pc]; // default 0
+        bool use_two = (ch >= 2);
+        bool chosen_pred = use_two ? p2 : p1;
+
+        // Remember what each said + which we used
+        last_p1_[pc] = p1;
+        last_p2_[pc] = p2;
+        used_two_[pc] = use_two;
+        last_chosen_[pc] = chosen_pred;
+
+        total_predictions++;
+        return chosen_pred;
+    }
+
+    void update(int pc, bool actual) override {
+        // Was our chosen prediction correct?
+        bool chosen_pred = last_chosen_[pc];
+        if (chosen_pred != actual) mispredictions++;
+
+        // Update components
+        onebit_.update(pc, actual);
+        twobit_.update(pc, actual);
+
+        // Update chooser: reward the component that was right (if the other was wrong)
+        int &ch = chooser_[pc];
+        bool p1 = last_p1_[pc];
+        bool p2 = last_p2_[pc];
+
+        if (p2 == actual && p1 != actual) {
+            if (ch < 3) ch++;           // move toward 2-bit
+        } else if (p1 == actual && p2 != actual) {
+            if (ch > 0) ch--;           // move toward 1-bit
+        }
+    }
+
+    std::string name() const override { return "Tournament(1b vs 2b)"; }
+
+private:
+    OneBitPredictor onebit_;
+    TwoBitPredictor twobit_;
+    std::unordered_map<int,int> chooser_;     // 0..3; >=2 => prefer 2-bit
+    std::unordered_map<int,bool> last_p1_;
+    std::unordered_map<int,bool> last_p2_;
+    std::unordered_map<int,bool> used_two_;
+    std::unordered_map<int,bool> last_chosen_;
+};
+

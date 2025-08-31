@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <string>
+#include <unordered_map>
 #include "instr.hpp"
 #include "metrics.hpp"
 #include "hazard.hpp"
@@ -33,12 +34,12 @@ public:
 
 private:
     const std::vector<Instruction>& prog_;
-    int pc_ = 0;         // program counter (index into prog_)
+    int pc_ = 0;         // next fetch PC
     int cycle_ = 0;
     bool halted_ = false;
     bool forwarding_ = true;
 
-    // Optional branch predictor (owned by caller)
+    // Optional predictor (owned by caller)
     BranchPredictor* bp_ = nullptr;
 
     // pipeline registers
@@ -47,9 +48,16 @@ private:
     EXMEM exmem_;
     MEMWB memwb_;
 
-    // control mispredict flush countdown (simulate 2-cycle flush)
+    // snapshot of WB stage for csv_row
+    Instruction last_wb_ins_{Opcode::NOP};
+    bool        last_wb_valid_ = false;
+
+    // control mispredict flush countdown (2 bubbles for EX-resolution)
     int control_flush_bubbles_ = 0;
 
-    // metrics
+    // record predicted direction per instruction id (made at ID)
+    std::unordered_map<int, bool> pred_taken_by_id_;
+
+    // Metrics
     Metrics m_;
 };

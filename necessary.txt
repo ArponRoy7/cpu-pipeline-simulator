@@ -1,0 +1,12 @@
+Predict at ID and fetch from the predicted PC the same cycle.
+
+At EX, resolve the branch, and on mispredict:
+
+Flush IF and ID (2 bubbles),
+
+Redirect pc_ to the correct target,
+
+Squash the just-fetched wrong-path instruction for the next cycle.
+
+Because we don’t have a real register file yet, we’ll use a toy outcome:
+actual is taken iff imm < 0 (works for demo). If your trace uses a back-edge (imm < 0), the branch will be always “taken” and you’ll create a loop—use the cycle cap (already present) or change the branch to a non-loop to see HALT.
