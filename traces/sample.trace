@@ -1,0 +1,7 @@
+# Simple sequence + a tiny loop
+LOAD r1 [r0+0]
+ADD  r2 r1 r1
+STORE r2 [r0+4]
+BEQ  r2 r1 -2   # if r2==r1, branch back 2 instr (to STORE)
+NOP
+HALT

@@ -1,0 +1,48 @@
+# Build artifacts
+/build/
+/bin/
+/CMakeFiles/
+/CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# IDE / editor stuff
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+
+# Compiled binaries / objects
+*.o
+*.obj
+*.exe
+*.out
+*.a
+*.so
+*.dll
+*.dylib
+
+# Logs and temporary files
+*.log
+*.tmp
+*.DS_Store
+
+# Python virtual env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data outputs
+/data/*.csv
+/data/figs/
+
+# Timeline HTML cache
+/ui-timeline/*.html~
+/ui-timeline/*.bak
+
+# Ignore everything in traces except sample/demo
+/traces/*
+!/traces/sample.trace
+!/traces/branch_demo.trace
